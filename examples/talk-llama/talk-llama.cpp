@@ -25,6 +25,20 @@ std::vector<llama_token> llama_tokenize(struct llama_context * ctx, const std::s
     return res;
 }
 
+std::string llama_token_to_piece(const struct llama_context * ctx, llama_token token) {
+    std::vector<char> result(8, 0);
+    const int n_tokens = llama_token_to_piece(ctx, token, result.data(), result.size());
+    if (n_tokens < 0) {
+        result.resize(-n_tokens);
+        int check = llama_token_to_piece(ctx, token, result.data(), result.size());
+        GGML_ASSERT(check == -n_tokens);
+    } else {
+        result.resize(n_tokens);
+    }
+
+    return std::string(result.data(), result.size());
+}
+
 // command-line parameters
 struct whisper_params {
     int32_t n_threads  = std::min(4, (int32_t) std::thread::hardware_concurrency());
@@ -235,7 +249,8 @@ int main(int argc, char ** argv) {
 
     // llama init
 
-    llama_init_backend();
+    // llama_init_backend();
+    llama_backend_init(false /* NUMA */);
 
     auto lparams = llama_context_default_params();
 
@@ -244,7 +259,14 @@ int main(int argc, char ** argv) {
     lparams.seed       = 1;
     lparams.f16_kv     = true;
 
-    struct llama_context * ctx_llama = llama_init_from_file(params.model_llama.c_str(), lparams);
+    // struct llama_context * ctx_llama = llama_init_from_file(params.model_llama.c_str(), lparams);
+    llama_model * model = llama_load_model_from_file(params.model_llama.c_str(), lparams);
+    if (model == NULL) {
+        fprintf(stderr , "%s: error: unable to load model\n" , __func__);
+        return 1;
+    }
+
+    llama_context * ctx_llama = llama_new_context_with_model(model, lparams);
 
     // print some info about the processing
     {
@@ -514,7 +536,7 @@ int main(int argc, char ** argv) {
                             //printf("\n---\n");
                             //printf("resetting: '");
                             //for (int i = 0; i < (int) embd.size(); i++) {
-                            //    printf("%s", llama_token_to_str(ctx_llama, embd[i]));
+                            //    printf("%s", llama_token_to_piece(ctx_llama, embd[i]));
                             //}
                             //printf("'\n");
                             //printf("\n---\n");
@@ -582,7 +604,7 @@ int main(int argc, char ** argv) {
                             auto logits = llama_get_logits(ctx_llama);
                             auto n_vocab = llama_n_vocab(ctx_llama);
 
-                            logits[llama_token_eos()] = 0;
+                            logits[llama_token_eos(ctx_llama)] = 0;
 
                             std::vector<llama_token_data> candidates;
                             candidates.reserve(n_vocab);
@@ -593,13 +615,13 @@ int main(int argc, char ** argv) {
                             llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
 
                             // apply repeat penalty
-                            const float nl_logit = logits[llama_token_nl()];
+                            const float nl_logit = logits[llama_token_nl(ctx_llama)];
 
                             llama_sample_repetition_penalty(ctx_llama, &candidates_p,
                                     embd_inp.data() + std::max(0, n_past - repeat_last_n),
                                     repeat_last_n, repeat_penalty);
 
-                            logits[llama_token_nl()] = nl_logit;
+                            logits[llama_token_nl(ctx_llama)] = nl_logit;
 
                             if (temp <= 0) {
                                 // Greedy sampling
@@ -613,22 +635,21 @@ int main(int argc, char ** argv) {
                             }
                         }
 
-                        if (id != llama_token_eos()) {
+                        if (id != llama_token_eos(ctx_llama)) {
                             // add it to the context
                             embd.push_back(id);
+                            text_to_speak += llama_token_to_piece(ctx_llama, id).c_str();
 
-                            text_to_speak += llama_token_to_str(ctx_llama, id);
-
-                            printf("%s", llama_token_to_str(ctx_llama, id));
+                            printf("%s", llama_token_to_piece(ctx_llama, id).c_str());
                         }
                     }
 
                     {
                         std::string last_output;
                         for (int i = embd_inp.size() - 16; i < (int) embd_inp.size(); i++) {
-                            last_output += llama_token_to_str(ctx_llama, embd_inp[i]);
+                            last_output += llama_token_to_piece(ctx_llama, embd_inp[i]).c_str();
                         }
-                        last_output += llama_token_to_str(ctx_llama, embd[0]);
+                        last_output += llama_token_to_piece(ctx_llama, embd[0]).c_str();
 
                         for (std::string & antiprompt : antiprompts) {
                             if (last_output.find(antiprompt.c_str(), last_output.length() - antiprompt.length(), antiprompt.length()) != std::string::npos) {
